@@ -13,9 +13,146 @@ using NinjaTrader.NinjaScript.DrawingTools;
 #endregion
 
 /*
- * stg20com34 — v1.16
+ * stg20com34 — v1.26 GOLD
  * Continuidade com VP Segmentado — Idom
- * 18/05/2026
+ * 21/05/2026
+ *
+ * RESULTADO IS VALIDADO (Jan–Abr/26, MNQ 06-26, 7ct):
+ *   FL 1.74 | Lucro +$12.234 | DD -$1.329 | +$3.109/mês | 850 trades
+ *   Supera the best (v1.11): FL 1.69 | +$11.640 | DD -$1.501 | +$2.958/mês
+ *   Todas correções operacionais de produção intactas (v1.13–v1.26)
+ *
+ * PARÂMETROS VALIDADOS (comparação sistemática — 21/05/2026):
+ *   RangeConsolidacaoTicks : 40t
+ *   ToleranciRetornoVTicks : 40t  (= RangeConsolidacaoTicks, como v1.11)
+ *   UsarFiltroRSI5m        : true (ativo como v1.11 — filtra entradas de menor qualidade)
+ *   UsarFiltroTendencia    : true
+ *   StopTicks              : 40t
+ *   D1Ticks / D1%          : 80t / 60%
+ *   D2Ticks / D2Stop       : 200t / 20t
+ *   D3Ticks / D3Stop       : 280t / 20t
+ *   UsarScoreExaustao      : true  (Score=2 — saídas antecipadas por exaustão)
+ *   ScoreExaustaoMinimo    : 2
+ *   BarsRequiredToTrade    : 40    (warmup indicadores 1m)
+ *   BarsArray[1].Count <   : 25    (warmup mínimo SMA 5m)
+ * Continuidade com VP Segmentado — Idom
+ * 21/05/2026
+ *
+ * CORRECOES v1.26 (comparação sistemática — avg tempo 3.67 min vs 10.82 min — 21/05/2026):
+ *
+ * FIX K — SetStopLoss restaurado em ExecutarEntrada() (CalculationMode.Ticks):
+ *   Causa raiz confirmada por dados: avg tempo no mercado 3.67 min (v1.25)
+ *   vs 10.82 min (v1.11 the best) — posições sendo stopadas na barra de entrada.
+ *   Comparação linha a linha:
+ *     v1.11: SetStopLoss(Ticks) em ExecutarEntrada() → proteção na mesma barra
+ *     v1.21+: stop só emitido na barra seguinte via _fillCompleto → 1 barra sem stop
+ *   Em backtest (OnBarClose), a barra da entrada já tem High/Low formados.
+ *   Se o Low da barra de entrada estiver abaixo do stop, o v1.11 protege,
+ *   o v1.21+ não — posição sobrevive 1 barra desprotegida e é stopada na próxima.
+ *   Solução: SetStopLoss(Ticks) em ExecutarEntrada() (= v1.11).
+ *   _fillCompleto mantido: quando confirmado, reemite SetStopLoss(Price) com
+ *   _stopInicial — sobrescreve o stop de Ticks com ancoragem em preço absoluto.
+ *   Em live: dupla proteção — stop imediato em Ticks + recalibração em Price pós-fill.
+ *   Em backtest: comportamento idêntico ao v1.11 the best.
+ *
+ * CORRECOES v1.25 (comparação sistemática v1.11 vs v1.24 — 21/05/2026):
+ *
+ * FIX I — Ordem timeout/verificação no FSM revertida para pós-verificação:
+ *   Problema (FIX v1.18 era excessivo em backtest): o timeout ANTES de
+ *   VerificarRetornoV/VerificarCruzamento1m eliminava setups legítimos
+ *   onde a barra exata do timeout coincidia com o RetornoV ou cruzamento.
+ *   No v1.11 the best, o timeout era verificado DEPOIS — o setup era
+ *   capturado primeiro, o timeout descartava apenas se não houvesse entrada.
+ *   O FIX v1.18 foi introduzido para resolver o bug de barRetornoV=0 após
+ *   ResetarFSM() dentro de ExecutarEntrada() — mas esse bug não existe em
+ *   backtest, apenas em live com restart. Solução: timeout DEPOIS da
+ *   verificação (comportamento the best), com guard barRetornoV/barExpulsao > 0
+ *   mantido para evitar o falso trigger caso ResetarFSM() zere as vars.
+ *
+ * FIX J — UsarFiltroRSI5m default true:
+ *   No v1.11 the best, rsiFavoravel5m estava sempre ativo na condição de
+ *   entrada. Com UsarFiltroRSI5m=false no v1.16+, entradas de menor qualidade
+ *   passavam. Confirmado por comparação sistemática: FL piora com RSI5m OFF.
+ *   Restaurado default true — parâmetro mantido configurável.
+ *
+ * CORRECOES v1.24 (replicar the best — 21/05/2026):
+ *
+ * FIX H — ToleranciRetornoVTicks 120 → 40:
+ *   No v1.11 the best, a tolerância do RetornoV era hardcoded como
+ *   RangeConsolidacaoTicks * TickSize = 40t. Com ToleranciRetornoVTicks=120t
+ *   o RetornoV aceita preço até 120t longe da SMA20 — entradas com
+ *   menor qualidade de posicionamento relativo ao suporte.
+ *   Solução: default ToleranciRetornoVTicks = 40 (igual ao the best).
+ *   Parâmetro mantido configurável para calibração futura.
+ *
+ * CORRECOES v1.23 (diagnóstico galinha dos ovos de ouro — 21/05/2026):
+ *
+ * FIX G — BarsArray[1].Count < 200 → < 25:
+ *   Causa raiz confirmada por comparação direta v1.11 (FL 1.69, 848 trades)
+ *   vs v1.21 (FL 0.94, 520 trades), parâmetros idênticos.
+ *   O guard BarsArray[1].Count < 200 aguarda 200 barras de 5m = ~16h de mercado
+ *   = ~1000 barras de 1m antes de liberar qualquer entrada. Isso descarta
+ *   todo o início de Jan/26 (regime direcional de alta) e reduz o universo
+ *   de trades em 40%. O filtro era excessivo: a SMA200(5m) com 25 barras
+ *   de 5m já tem valor válido para o filtro de tendência (sma20 vs sma200),
+ *   mesmo que não esteja no valor "estabilizado" de longo prazo.
+ *   Solução: BarsArray[1].Count < 25 (reproduz comportamento do v1.11 the best).
+ *   BarsRequiredToTrade mantido em 40 (warmup indicadores 1m).
+ *   Todas as correções operacionais v1.13–v1.21 (FIX A/B/C/D/E) intactas.
+ *
+ * CORRECOES v1.21 (diagnóstico log IS Jan–Abr/26 — 21/05/2026):
+ *
+ * FIX D — BarsRequiredToTrade 40 → 200:
+ *   Problema: SMA200(5m) precisa de 200 barras para estabilizar (~16h de mercado).
+ *   Com BarsRequiredToTrade=40, o backtest iniciava entradas antes do warmup completo.
+ *   Log confirmou sma20_5m == sma200_5m nas primeiras horas — filtro de tendência
+ *   retornava tend:True incorretamente, liberando entradas sem filtro real.
+ *   Solução: BarsRequiredToTrade=200 + guard BarsArray[1].Count < 200 no OnBarUpdate.
+ *
+ * FIX E — Remoção do painel visual (prematuro):
+ *   DesenharPainel(), _lastPainelBar, MostrarPainel removidos.
+ *   Painel só será útil em live sim monitorado — não agora.
+ *
+ * NOVO v1.20 — Painel visual (revertido em v1.21)
+ *
+ * CORRECOES v1.19 (auditoria operacional — 21/05/2026):
+ *
+ * FIX A — Restart Recovery (BUG OPERACIONAL CONFIRMADO):
+ *   Problema: MaxRestarts reiniciava a estratégia sobre posição aberta herdada.
+ *   Com _fillCompleto=false e posQtd < Contratos, GerenciarPosicao() ficava em
+ *   loop eterno de "Aguardando fill" — posição desprotegida até ExitOnSessionClose.
+ *   Evidência: log 21/05 06:01 "AccountPosition=MNQ 06-26 3L" (29 min sem stop gerenciado).
+ *   Solução: novo bloco de recovery em GerenciarPosicao() detecta posição herdada
+ *   (posQtd > 0 && posQtd < Contratos && !_fillCompleto), adota a quantidade real,
+ *   recalcula _stopInicial baseado em Position.AveragePrice e emite SetStopLoss imediatamente.
+ *   Flag _restartRecovery para identificar no log. precoEntrada corrigido para AveragePrice.
+ *
+ * FIX B — Fechamento externo não detectado (BUG LATENTE):
+ *   Problema: saída manual (order-quick, Zerar externo, etc.) não redefinia _fillCompleto
+ *   e flags D1/D2/D3, deixando FSM em estado inconsistente.
+ *   Evidência: CSV 20/05 20:56 — 4ct fechados por "order-quick" sem reset da estratégia.
+ *   Risco: reentrada indesejada na mesma janela RetornoV se SMA34 cruzasse novamente.
+ *   Solução: novo bloco em OnExecutionUpdate detecta marketPosition==Flat quando
+ *   _fillCompleto==true e não houve D1/D2/D3 pela estratégia (fechamento externo),
+ *   ou quando houve desalavancagem mas a posição zerou por caminho não monitorado.
+ *   Reseta _fillCompleto, _qtdInicial e flags D1/D2/D3. ResetarFSM() apenas se
+ *   ainda não havia sido chamado por StopCancelClose/Zerar.
+ *
+ * FIX C — precoEntrada em modo recovery usa AveragePrice:
+ *   Ao herdar posição, precoEntrada era 0 (nunca setado por ExecutarEntrada).
+ *   pnlTicks ficava inválido. Corrigido: _restartRecovery flag garante que
+ *   precoEntrada seja setado para Position.AveragePrice na primeira barra de gestão.
+ *
+ * CORRECAO v1.18 (bug crítico operacional — 19/05/2026):
+ * - Timeout de RetornoV e Expulsao verificados ANTES de VerificarCruzamento1m/VerificarRetornoV
+ * - Guard: timeout só dispara se barRetornoV > 0 / barExpulsao > 0
+ * - Problema: ResetarFSM() zeraba barRetornoV=0 dentro de ExecutarEntrada()
+ *   Ao checar CurrentBar - 0 > 80 depois, sempre verdadeiro → segundo ResetarFSM()
+ *   tentava cancelar stop já ativo na conta Apex → NT8 desabilitava a estratégia
+ * - SetStopLoss removido de ExecutarEntrada() — não emitir stop antes do fill completo
+ * - Stop inicial agora emitido em GerenciarPosicao() dentro do bloco _fillCompleto
+ * - CalculationMode.Ticks → CalculationMode.Price com _stopInicial (preço absoluto)
+ *   Previne fragmentação de posição após saídas parciais (D1/D2/D3)
  *
  * LOGICA:
  * 1. Consolidacao: preco dentro das bandas da SMA20(5m) por N barras
@@ -134,9 +271,12 @@ namespace NinjaTrader.NinjaScript.Strategies
         private bool   trailAtivo       = false;
 
         // Fill guard e quantidade inicial (modelo desalavancagem padrão)
-        private bool   _fillCompleto    = false;
-        private int    _qtdInicial      = 0;
-        private double _stopInicial     = 0;
+        private bool   _fillCompleto      = false;
+        private int    _qtdInicial        = 0;
+        private double _stopInicial       = 0;
+
+        // FIX A v1.19: flag de recovery após restart com posição herdada
+        private bool   _restartRecovery   = false;
 
         // Stop progressivo — preço no momento de cada desalavancagem
         private double precoEntrada     = 0;
@@ -171,7 +311,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (State == State.SetDefaults)
             {
                 Description = "Continuidade com VP Segmentado — Léo Molini (Dolarize)";
-                Name        = "stg20com34_v115";
+                Name        = "stg20com34_v126_GOLD";
                 Calculate   = Calculate.OnBarClose;
 
                 HabilitarLong  = true;
@@ -192,12 +332,12 @@ namespace NinjaTrader.NinjaScript.Strategies
                 DeltaMinimo         = 0;
                 RSIFiltroMinimo     = 45;
                 UsarFiltroTendencia = true;
-                UsarFiltroRSI5m     = false;  // FIX 3: toggle RSI5m no cruzamento — OFF = comportamento corrigido
+                UsarFiltroRSI5m     = true;   // GOLD: validado ON — filtra entradas de menor qualidade
 
                 // FIX 2: tolerância RetornoV independente da banda de consolidação
                 // Padrão 120t — mais amplo que RangeConsolidacaoTicks (80t)
                 // Permite reconhecer RetornoV mesmo quando preço corrige mais fundo
-                ToleranciRetornoVTicks = 120;
+                ToleranciRetornoVTicks = 40;   // v1.24: 120→40 — replica the best (v1.11 hardcoded RangeConsolidacaoTicks)
 
                 // Gestão — tamanho e stop
                 Contratos   = 1;
@@ -220,11 +360,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                 MaxPerdaPorDia  = 500.0;
 
                 // Score de exaustão
-                UsarScoreExaustao   = false;
+                UsarScoreExaustao   = true;   // GOLD: validado ON — Score=2, saídas antecipadas por exaustão
                 NBarrasVolume       = 3;
                 NBarrasDelta        = 2;
                 NBarrasRSI          = 2;
-                ScoreExaustaoMinimo = 4.0;
+                ScoreExaustaoMinimo = 2.0;    // GOLD: validado Score=2
 
                 // Stop máximo por entrada (0 = desabilitado)
                 StopMaxTicks = 0;
@@ -234,7 +374,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 IsExitOnSessionCloseStrategy = true;
                 ExitOnSessionCloseSeconds    = 30;
-                BarsRequiredToTrade          = 40;
+                BarsRequiredToTrade          = 40;  // v1.23: revertido para 40 — warmup indicadores 1m; SMA(5m) protegida pelo guard BarsArray[1].Count < 25
             }
             else if (State == State.Configure)
             {
@@ -258,7 +398,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (BarsInProgress != 0) return;
             if (CurrentBar < BarsRequiredToTrade) return;
-            if (BarsArray[1].Count < 25) return;
+            if (BarsArray[1].Count < 25) return;  // v1.23: 200→25 — aguarda warmup mínimo SMA(5m); guard excessivo eliminava ~40% das entradas válidas
 
             AtualizarControleDiario();
             if (bloqueadoHoje) return;
@@ -290,8 +430,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     break;
 
                 case EstadoFSM.Expulsao:
+                    // v1.25: verificação ANTES do timeout (comportamento v1.11 the best)
+                    // Guard barExpulsao > 0 evita falso trigger se ResetarFSM() zerou a var
                     VerificarRetornoV();
-                    if (CurrentBar - barExpulsao > 60)
+                    if (barExpulsao > 0 && CurrentBar - barExpulsao > 60)
                     {
                         if (ModoDebug) Print(Time[0] + " | Timeout Expulsao — resetando");
                         ResetarFSM();
@@ -299,8 +441,10 @@ namespace NinjaTrader.NinjaScript.Strategies
                     break;
 
                 case EstadoFSM.RetornoV:
+                    // v1.25: verificação ANTES do timeout (comportamento v1.11 the best)
+                    // Guard barRetornoV > 0 evita falso trigger se ResetarFSM() zerou a var
                     VerificarCruzamento1m();
-                    if (CurrentBar - barRetornoV > 80)
+                    if (barRetornoV > 0 && CurrentBar - barRetornoV > 80)
                     {
                         if (ModoDebug) Print(Time[0] + " | Timeout RetornoV — resetando");
                         ResetarFSM();
@@ -529,6 +673,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 _stopInicial = stopPriceLong;
                 EnterLong(Contratos, "EntradaLong");
+                // FIX K v1.26: stop imediato na barra de entrada (= v1.11 the best)
+                // _fillCompleto reemitirá SetStopLoss(Price) pós-fill para ancoragem absoluta
                 SetStopLoss("EntradaLong", CalculationMode.Ticks, StopTicks, false);
                 if (ModoDebug) Print(Time[0] + " | ★ ENTRADA LONG @ " + Close[0]
                     + " | Contratos: " + Contratos
@@ -550,6 +696,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 }
                 _stopInicial = stopPriceShort;
                 EnterShort(Contratos, "EntradaShort");
+                // FIX K v1.26: stop imediato na barra de entrada (= v1.11 the best)
+                // _fillCompleto reemitirá SetStopLoss(Price) pós-fill para ancoragem absoluta
                 SetStopLoss("EntradaShort", CalculationMode.Ticks, StopTicks, false);
                 if (ModoDebug) Print(Time[0] + " | ★ ENTRADA SHORT @ " + Close[0]
                     + " | Contratos: " + Contratos
@@ -579,8 +727,40 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     _qtdInicial  = Contratos; // C1: sempre o valor configurado, nunca posQtd
                     _fillCompleto = true;
-                    if (ModoDebug) Print(Time[0] + " | Fill completo | _qtdInicial=" + _qtdInicial);
+
+                    // Bug 1+3 fix: stop inicial emitido APÓS fill completo, com Price (não Ticks)
+                    // Evita fragmentação de posição e stop prematuro sobre fill parcial
+                    SetStopLoss(nomeEntrada, CalculationMode.Price, _stopInicial, false);
+
+                    if (ModoDebug) Print(Time[0] + " | Fill completo | _qtdInicial=" + _qtdInicial
+                        + " | stop inicial @ " + _stopInicial.ToString("F2"));
                 }
+                // ── FIX A v1.19: Restart Recovery ────────────────────────────
+                // Detecta posição herdada após MaxRestarts: posQtd > 0 mas < Contratos
+                // porque a estratégia reiniciou no meio de uma posição existente.
+                // Em vez de aguardar fill eterno, adota a quantidade real e emite stop
+                // baseado em AveragePrice para proteger imediatamente.
+                else if (posQtd > 0)
+                {
+                    _qtdInicial      = posQtd;                  // adota quantidade real herdada
+                    _fillCompleto    = true;
+                    _restartRecovery = true;
+
+                    // precoEntrada era 0 (ExecutarEntrada não foi chamada nesta instância)
+                    precoEntrada = Position.AveragePrice;
+
+                    // Recalcula stop baseado no preço médio real da posição
+                    _stopInicial = isLong
+                        ? Position.AveragePrice - StopTicks * TickSize
+                        : Position.AveragePrice + StopTicks * TickSize;
+
+                    SetStopLoss(nomeEntrada, CalculationMode.Price, _stopInicial, false);
+
+                    Print(Time[0] + " | ★ RESTART RECOVERY | qtd herdada=" + _qtdInicial
+                        + " | avgPrice=" + Position.AveragePrice.ToString("F2")
+                        + " | stop recalibrado @ " + _stopInicial.ToString("F2"));
+                }
+                // ─────────────────────────────────────────────────────────────
                 else
                 {
                     if (ModoDebug) Print(Time[0] + " | Aguardando fill | pos=" + posQtd + " / " + Contratos);
@@ -929,6 +1109,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             }
         }
 
+
         private void ResetarFSM()
         {
             estado           = EstadoFSM.Aguardando;
@@ -967,6 +1148,34 @@ namespace NinjaTrader.NinjaScript.Strategies
                         + " | perdaHoje: " + perdaHoje.ToString("F2")
                         + " | stopsHoje: " + stopsHoje
                         + " | tradesHoje: " + tradesHoje);
+
+                // ── FIX B v1.19: Fechamento externo não detectado ─────────────
+                // Detecta quando a posição zerou por ordem externa (order-quick,
+                // Zerar manual, etc.) que a estratégia não emitiu.
+                // Condição: _fillCompleto=true (havia posição gerenciada) mas não
+                // foi via StopCancelClose/Zerar (tratados no bloco abaixo) e não
+                // foi via D1/D2/D3 completo (trail) — ou seja, ainda havia saldo.
+                // Reset limpo de todos os flags para evitar reentrada indesejada.
+                if (_fillCompleto)
+                {
+                    string nomeExec = execution.Order != null ? execution.Order.Name : "";
+                    bool   foiStopEstrategia = (nomeExec == "StopCancelClose" || nomeExec == "Zerar");
+
+                    if (!foiStopEstrategia)
+                    {
+                        if (ModoDebug) Print(time + " | Fechamento externo detectado (" + nomeExec
+                            + ") → reset flags gestao");
+                        _fillCompleto    = false;
+                        _qtdInicial      = 0;
+                        _restartRecovery = false;
+                        d1Executada      = false;
+                        d2Executada      = false;
+                        d3Executada      = false;
+                        trailAtivo       = false;
+                        ResetarFSM();
+                    }
+                }
+                // ─────────────────────────────────────────────────────────────
             }
 
             // C3: detectar fechamento de resíduo por stop invertido → limpar FSM
@@ -976,12 +1185,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             {
                 if (ModoDebug) Print(time + " | OnExec: " + execution.Order.Name + " → ResetarFSM forçado");
                 ResetarFSM();
-                _fillCompleto = false;
-                _qtdInicial   = 0;
-                d1Executada   = false;
-                d2Executada   = false;
-                d3Executada   = false;
-                trailAtivo    = false;
+                _fillCompleto    = false;
+                _qtdInicial      = 0;
+                _restartRecovery = false;
+                d1Executada      = false;
+                d2Executada      = false;
+                d3Executada      = false;
+                trailAtivo       = false;
             }
         }
         #endregion
