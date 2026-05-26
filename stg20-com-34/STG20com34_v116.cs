@@ -13,9 +13,40 @@ using NinjaTrader.NinjaScript.DrawingTools;
 #endregion
 
 /*
- * stg20com34 — v1.26 GOLD
+ * stg20com34 — v1.28
  * Continuidade com VP Segmentado — Idom
- * 21/05/2026
+ * 25/05/2026
+ *
+ * CORRECOES v1.27 (bug bloqueante live sim — 22/05/2026):
+ *
+ *
+ * CORRECAO v1.28 — FIX M — SetStopLoss após D1/D2/D3 diferido (BUG BLOQUEANTE LIVE):
+ *   Causa raiz (25/05/2026 08:07): ExitLong(D1) + SetStopLoss() na mesma barra.
+ *   NT8 ainda não processou o fill parcial quando SetStopLoss tenta modificar
+ *   a ordem de stop original (ainda em voo) → broker rejeita "Não é possível
+ *   alterar ordem" → estratégia cancela tudo e se mata.
+ *   Solução: flags _stopD1Pendente/_stopD2Pendente/_stopD3Pendente + preço alvo.
+ *   Após ExitLong/Short parcial, apenas setar a flag e o preço.
+ *   Na barra SEGUINTE (OnBarUpdate), verificar flag e emitir SetStopLoss.
+ *   Isso garante que o fill parcial foi confirmado antes da modificação do stop.
+ *
+ * FIX L — Trail pós-D3 substituído por gestão manual de stop em preço:
+ *   Causa raiz confirmada em live sim 22/05 02:57:
+ *   SetTrailStop('EntradaLong', Ticks, 20, false) referencia a ordem original
+ *   de 7ct. NT8 cancela e reabre o stop para o tamanho da ordem de entrada,
+ *   não para o residual real (1ct). Resultado: stop de Venda 4ct emitido,
+ *   abrindo posição Short involuntária de 4ct após fechar o residual Long.
+ *   Solução: trail manual com SetStopLoss(Price) calculado barra a barra.
+ *   _trailHighMax (Long) / _trailLowMin (Short) rastreiam o melhor High/Low
+ *   desde a ativação do trail (High[0]/Low[0] — não Close[0], para replicar
+ *   o comportamento intrabar do SetTrailStop nativo em OnBarClose).
+ *   A cada barra: novo High > _trailHighMax → atualiza referência e emite
+ *   SetStopLoss(Price, highMax - TrailTicks*TickSize). Stop só avança,
+ *   nunca recua. Backtest IS v1.27a (Close[0]): FL 1.61 / 907 trades.
+ *   Ajuste v1.27b (High[0]/Low[0]): FL 1.61 / 907 trades — sem melhora.
+ *   Ajuste v1.27c: _trailHighMax/_trailLowMin inicializados em precoD3
+ *   no bloco D3 (não em High[0] da barra seguinte). Inicialização com
+ *   High[0] podia ser menor que precoD3, stopando residual prematuramente.
  *
  * RESULTADO IS VALIDADO (Jan–Abr/26, MNQ 06-26, 7ct):
  *   FL 1.74 | Lucro +$12.234 | DD -$1.329 | +$3.109/mês | 850 trades
@@ -166,7 +197,7 @@ using NinjaTrader.NinjaScript.DrawingTools;
  * D1 — alvo D1Ticks ou score exaustao >= limiar → sai 60% → stop para Math.Max(BE, _stopInicial)
  * D2 — alvo D2Ticks ou score exaustao >= limiar → sai 20% total (50% saldo D1) → stop para precoD2 - D2StopTicks
  * D3 — alvo D3Ticks ou score exaustao >= limiar → sai 10% total (50% saldo D2) → stop para precoD3 - D3StopTicks
- * Apos D3 → SetTrailStop nativo (TrailTicks)
+ * Apos D3 → Trail manual: SetStopLoss(Price) rastreando pico/vale barra a barra
  *
  * PROPORCOES: D1/D2/D3 calculadas sobre _qtdInicial (fixado no fill completo),
  * nao sobre saldo remanescente. Anti-overshooting em toda saida.
@@ -278,6 +309,18 @@ namespace NinjaTrader.NinjaScript.Strategies
         // FIX A v1.19: flag de recovery após restart com posição herdada
         private bool   _restartRecovery   = false;
 
+        // FIX L v1.27: trail manual pós-D3 (substitui SetTrailStop)
+        private double _trailHighMax      = 0;  // Long: pico máximo desde trail ativado
+        private double _trailLowMin       = 0;  // Short: vale mínimo desde trail ativado
+
+        // FIX M: deferimento de SetStopLoss após saídas parciais D1/D2/D3
+        private bool   _stopD1Pendente   = false;
+        private bool   _stopD2Pendente   = false;
+        private bool   _stopD3Pendente   = false;
+        private double _stopD1Preco      = 0;
+        private double _stopD2Preco      = 0;
+        private double _stopD3Preco      = 0;
+
         // Stop progressivo — preço no momento de cada desalavancagem
         private double precoEntrada     = 0;
         private double precoD2          = 0;
@@ -311,7 +354,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (State == State.SetDefaults)
             {
                 Description = "Continuidade com VP Segmentado — Léo Molini (Dolarize)";
-                Name        = "stg20com34_v126_GOLD";
+                Name        = "stg20com34_v127c";
                 Calculate   = Calculate.OnBarClose;
 
                 HabilitarLong  = true;
@@ -651,6 +694,10 @@ namespace NinjaTrader.NinjaScript.Strategies
             _fillCompleto    = false;
             _qtdInicial      = 0;
 
+            // Reset trail manual (FIX L v1.27)
+            _trailHighMax    = 0;
+            _trailLowMin     = 0;
+
             // Reset score exaustão
             deltaCumAtual    = 0;
             deltaCumAnterior = 0;
@@ -790,6 +837,27 @@ namespace NinjaTrader.NinjaScript.Strategies
                     + " | d1:" + d1Executada + " d2:" + d2Executada + " d3:" + d3Executada
                     + " | trail:" + trailAtivo);
 
+            // ── FIX M: despachar stops pendentes (diferidos da barra anterior) ──
+            if (_stopD1Pendente)
+            {
+                SetStopLoss(nomeEntrada, CalculationMode.Price, _stopD1Preco, false);
+                _stopD1Pendente = false;
+                if (ModoDebug) Print(Time[0] + " | StopD1 despachado @ " + _stopD1Preco.ToString("F2"));
+            }
+            if (_stopD2Pendente)
+            {
+                SetStopLoss(nomeEntrada, CalculationMode.Price, _stopD2Preco, false);
+                _stopD2Pendente = false;
+                if (ModoDebug) Print(Time[0] + " | StopD2 despachado @ " + _stopD2Preco.ToString("F2"));
+            }
+            if (_stopD3Pendente)
+            {
+                SetStopLoss(nomeEntrada, CalculationMode.Price, _stopD3Preco, false);
+                _stopD3Pendente = false;
+                if (ModoDebug) Print(Time[0] + " | StopD3 despachado @ " + _stopD3Preco.ToString("F2"));
+            }
+            // ─────────────────────────────────────────────────────────────────
+
             // ── D1 ────────────────────────────────────────────────────────────
             if (!d1Executada && (pnlTicks >= D1Ticks || score >= ScoreExaustaoMinimo))
             {
@@ -808,12 +876,14 @@ namespace NinjaTrader.NinjaScript.Strategies
                     else        ExitShort(qtdD1, "D1", nomeEntrada);
                 }
 
-                // Stop vai para Math.Max(BE, _stopInicial) Long / Math.Min Short
+                // FIX M: NÃO emitir SetStopLoss aqui — fill ainda não confirmado.
+                // Diferir para próxima barra via flag.
                 double stopD1 = isLong
                     ? Math.Max(precoEntrada, _stopInicial)
                     : Math.Min(precoEntrada, _stopInicial);
 
-                SetStopLoss(nomeEntrada, CalculationMode.Price, stopD1, false);
+                _stopD1Preco    = stopD1;
+                _stopD1Pendente = true;
 
                 d1Executada = true;
 
@@ -848,7 +918,9 @@ namespace NinjaTrader.NinjaScript.Strategies
                     ? precoD2 - D2StopTicks * TickSize
                     : precoD2 + D2StopTicks * TickSize;
 
-                SetStopLoss(nomeEntrada, CalculationMode.Price, novoStopD2, false);
+                // FIX M: diferir SetStopLoss
+                _stopD2Preco    = novoStopD2;
+                _stopD2Pendente = true;
 
                 d2Executada = true;
 
@@ -883,10 +955,16 @@ namespace NinjaTrader.NinjaScript.Strategies
                     ? precoD3 - D3StopTicks * TickSize
                     : precoD3 + D3StopTicks * TickSize;
 
-                SetStopLoss(nomeEntrada, CalculationMode.Price, novoStopD3, false);
+                // FIX M: diferir SetStopLoss
+                _stopD3Preco    = novoStopD3;
+                _stopD3Pendente = true;
 
-                d3Executada = true;
-                trailAtivo  = true;
+                d3Executada   = true;
+                trailAtivo    = true;
+                // FIX L v1.27c: ancora trail no precoD3 — evita inicialização
+                // com High[0] da barra seguinte que pode já estar abaixo do D3
+                _trailHighMax = precoD3;  // Long: pico inicial = preço de saída D3
+                _trailLowMin  = precoD3;  // Short: vale inicial = preço de saída D3
 
                 if (ModoDebug) Print(Time[0]
                     + " | D3 executada | qtd:" + qtdD3
@@ -897,13 +975,41 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
-            // ── Trail após D3 ─────────────────────────────────────────────────
+            // ── Trail após D3 — FIX L v1.27 ──────────────────────────────────
+            // SetTrailStop substituído por gestão manual de stop em preço.
+            // Motivo: SetTrailStop referencia a ordem original (7ct) e emite
+            // stop pelo tamanho original — não pelo residual real (1ct).
+            // Aqui: rastreamos o pico/vale manualmente e emitimos SetStopLoss(Price).
             if (trailAtivo && d3Executada && Position.Quantity > 0)
             {
                 if (isLong)
-                    SetTrailStop(nomeEntrada, CalculationMode.Ticks, TrailTicks, false);
+                {
+                    // Avança pelo High da barra — replica comportamento intrabar do SetTrailStop nativo
+                    // _trailHighMax pré-inicializado em precoD3 (FIX L v1.27c)
+                    if (High[0] > _trailHighMax) _trailHighMax = High[0];
+
+                    double stopTrail = _trailHighMax - TrailTicks * TickSize;
+                    SetStopLoss(nomeEntrada, CalculationMode.Price, stopTrail, false);
+
+                    if (ModoDebug) Print(Time[0]
+                        + " | Trail Long | highMax:" + _trailHighMax.ToString("F2")
+                        + " | stopTrail:" + stopTrail.ToString("F2")
+                        + " | pos:" + Position.Quantity);
+                }
                 else
-                    SetTrailStop(nomeEntrada, CalculationMode.Ticks, TrailTicks, false);
+                {
+                    // Avança pelo Low da barra — replica comportamento intrabar do SetTrailStop nativo
+                    // _trailLowMin pré-inicializado em precoD3 (FIX L v1.27c)
+                    if (Low[0] < _trailLowMin) _trailLowMin = Low[0];
+
+                    double stopTrail = _trailLowMin + TrailTicks * TickSize;
+                    SetStopLoss(nomeEntrada, CalculationMode.Price, stopTrail, false);
+
+                    if (ModoDebug) Print(Time[0]
+                        + " | Trail Short | lowMin:" + _trailLowMin.ToString("F2")
+                        + " | stopTrail:" + stopTrail.ToString("F2")
+                        + " | pos:" + Position.Quantity);
+                }
             }
         }
         #endregion
@@ -1121,6 +1227,13 @@ namespace NinjaTrader.NinjaScript.Strategies
             rangeLow         = 0;
             pocNivel         = 0;
             barsConsolidando = 0;
+            // FIX M: limpar stops pendentes ao resetar FSM
+            _stopD1Pendente  = false;
+            _stopD2Pendente  = false;
+            _stopD3Pendente  = false;
+            _stopD1Preco     = 0;
+            _stopD2Preco     = 0;
+            _stopD3Preco     = 0;
         }
         #endregion
 
@@ -1172,6 +1285,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                         d2Executada      = false;
                         d3Executada      = false;
                         trailAtivo       = false;
+                        _trailHighMax    = 0;
+                        _trailLowMin     = 0;
                         ResetarFSM();
                     }
                 }
@@ -1192,6 +1307,8 @@ namespace NinjaTrader.NinjaScript.Strategies
                 d2Executada      = false;
                 d3Executada      = false;
                 trailAtivo       = false;
+                _trailHighMax    = 0;
+                _trailLowMin     = 0;
             }
         }
         #endregion

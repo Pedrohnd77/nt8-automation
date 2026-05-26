@@ -15,30 +15,74 @@ using System.Linq;
 
 /*
  * ╔══════════════════════════════════════════════════════════════════════════╗
- * ║                        Scalp20_34  –  v3.4                             ║
- * ║         Gerado: 20/05/2026  |  Autor: Idom                             ║
+ * ║                        Scalp20_34  –  v3.8                             ║
+ * ║         Gerado: 25/05/2026  |  Autor: Idom                             ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
  * ║  Operacional: Consolidação EMA20/EMA34 → Breakout com agressão         ║
  * ║               confirmada → Entrada a mercado + D1/D2/D3 + Trail        ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
- * ║  v3.3 – Bug 1 fix: Exit ANTES do SetStopLoss em D1/D2/D3 Long e Short  ║
- * ║         Stop emitido antes da saída parcial mantinha qtd original da    ║
- * ║         posição → ao atingir BE fechava residual + abria Short/Long     ║
- * ║         invertido. Observado em tempo real 19/05/2026: 1ct Short aberto ║
- * ║         após D1 de 3ct em posição Long de 5ct.                          ║
- * ║         Correção: ExitLong/Short disparado primeiro, SetStopLoss        ║
- * ║         reemitido imediatamente após para cobrir apenas o residual.      ║
+ * ║  v3.8 – Bug 6 fix: stop BE inválido após D1 (acima do mercado)        ║
+ * ║  ──────────────────────────────────────────────────────────────────     ║
+ * ║  PROBLEMA CONFIRMADO (teste real 25/05/2026 trade 06:32):              ║
+ * ║    Após D1 com PnL negativo (mercado recuou antes de atingir alvo),    ║
+ * ║    o código move o stop para BE = _entradaPreco. Se o mercado já       ║
+ * ║    estiver abaixo de _entradaPreco, o NT tenta emitir Sell Stop        ║
+ * ║    acima do bid atual → Rithmic rejeita com erro "preço de stop        ║
+ * ║    não pode ser alterado acima do mercado". Residual de 3ct ficou      ║
+ * ║    sem stop válido por tempo indeterminado.                            ║
+ * ║  CORREÇÃO APLICADA (Fix 6):                                            ║
+ * ║    D1 Long: bePrice = Math.Max(bePrice calculado, Close[0] - 2t)      ║
+ * ║             garante que stop de venda nunca seja >= Close[0].          ║
+ * ║    D1 Short: bePrice = Math.Min(bePrice calculado, Close[0] + 2t)     ║
+ * ║             garante que stop de compra nunca seja <= Close[0].         ║
+ * ║    Aplica antes de qualquer SetStopLoss pós-D1/D2/D3.                 ║
+ * ║  ──────────────────────────────────────────────────────────────────     ║
+ * ║  v3.7 – Bug 5 fix: stop órfão após Exit on session close               ║
+ * ║  ──────────────────────────────────────────────────────────────────     ║
+ * ║  PROBLEMA CONFIRMADO (análise execuções 01–22/05/2026):                ║
+ * ║    Exit on session close fecha posição residual (ex: 2ct às 18:00)     ║
+ * ║    mas o FSM permanece em Fase.Executada porque o evento ocorre        ║
+ * ║    fora do ciclo OnBarUpdate. O stop pendente então dispara na         ║
+ * ║    sessão seguinte sobre posição zero → execução órfã de 5ct.          ║
+ * ║    6 ocorrências confirmadas no período, incluindo uma de 5ct          ║
+ * ║    (13/05 21:01 e 21/05 21:23).                                        ║
+ * ║  CORREÇÃO APLICADA:                                                     ║
+ * ║    [Fix 5] OnExecutionUpdate: detecta qualquer fill que resulte em      ║
+ * ║             Position.Flat enquanto FSM está em Executada → chama       ║
+ * ║             ResetarFase() imediatamente, independente de barra.        ║
+ * ║             Cobre: session close, zerar manual, StopCancelClose.       ║
+ * ║  ──────────────────────────────────────────────────────────────────     ║
+ * ║  v3.6 – Bug 4 fix: inversão de posição após stop residual pós-D1       ║
+ * ║  ──────────────────────────────────────────────────────────────────     ║
+ * ║  PROBLEMA CONFIRMADO EM REALTIME (21/05 01:08):                        ║
+ * ║    Stop de 5ct disparado sobre posição residual de 2ct → zerou Long    ║
+ * ║    e abriu 3ct Short involuntário. Ocorre quando fill vem em lote       ║
+ * ║    único E StopTargetHandling="Execução por entrada": o NT8 mantém     ║
+ * ║    a quantidade original da entrada (5ct) na ordem de stop mesmo       ║
+ * ║    após a saída parcial via D1.                                         ║
+ * ║  CORREÇÕES APLICADAS:                                                   ║
+ * ║    [Fix 4a] GerenciarSaida(): guard de inversão acidental — se posição  ║
+ * ║             virar Short/Long quando _fase=Executada e direção não       ║
+ * ║             corresponde, fecha emergencialmente e reseta FSM.           ║
+ * ║    [Fix 4b] Contagem de stop na inversão: OnExecutionUpdate detecta     ║
+ * ║             ordem de stop que gerou inversão e reseta FSM de imediato,  ║
+ * ║             sem aguardar próxima barra.                                 ║
+ * ║    [Fix 4c] EntradaPreco usa Position.AveragePrice pós-fillCompleto     ║
+ * ║             em vez de Close[0] do barclose — elimina discrepância de    ║
+ * ║             1–2pt entre preço logado e fill real, afastando o BE do     ║
+ * ║             preço de entrada real.                                      ║
+ * ║    [Fix 4d] SetStopLoss com fromEntrySignal vazio ("") após D1/D2/D3   ║
+ * ║             para forçar NT8 a aplicar sobre posição residual corrente   ║
+ * ║             e não sobre a ordem de entrada original.                    ║
+ * ║  ──────────────────────────────────────────────────────────────────     ║
+ * ║  v3.5 – Bug 3 fix: stop reemitido após fillCompleto (abordagem dupla)  ║
+ * ║  v3.4 – Bug 2 fix: contador stops 1x por trade                        ║
+ * ║  v3.3 – Bug 1 fix: Exit antes SetStopLoss em D1/D2/D3                 ║
  * ║  v3.2 – FSM neutra a flags de direção                                  ║
- * ║  v3.1 – Fix1: TODOS os Print() protegidos com guard ModoDebug          ║
- * ║         Fix2: Painel unificado "05 — Gestão" igual à stg20com34        ║
- * ║         Fix3: Padrões corrigidos para baseline v4.1 validado           ║
- * ║         Proteções C1–C4 mantidas da v3.0                               ║
+ * ║  v3.1 – Painel unificado | Debug limpo | Baseline v4.1                 ║
  * ╠══════════════════════════════════════════════════════════════════════════╣
  * ║  v3.0 – Modelo completo D1/D2/D3 + C1-C4 + Short ON/OFF funcional     ║
  * ║  v2.4 – GOLD: Long puro estrutural + Stop Range como padrão            ║
- * ║  v2.3 – D2 dinâmica restrita ao Long                                   ║
- * ║  v2.2 – Base v1.5 gold restaurada | D2 dinâmica MM200 + score         ║
- * ║  v1.5 – Gestão de risco diário | Remoção do filtro horário             ║
  * ║  Instrumentos: MNQ / MES  |  TF: 1m ou 2m                             ║
  * ╚══════════════════════════════════════════════════════════════════════════╝
  */
@@ -93,6 +137,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         private double   _perdaDiariaAcum = 0;
         private DateTime _diaAtual        = DateTime.MinValue;
         private bool     _bloqueioLogado  = false;
+        private bool     _stopContadoEsteTradeFlag = false; // impede dupla contagem por fill em lotes
 
         // ─────────────────────────────────────────────────────────────────────
         #region OnStateChange
@@ -100,7 +145,7 @@ namespace NinjaTrader.NinjaScript.Strategies
         {
             if (State == State.SetDefaults)
             {
-                Description = "Scalp20_34 v3.4 | Bug2 fix: SetStopLoss com quantity residual em D1/D2/D3 | Baseline v4.1";
+                Description = "Scalp20_34 v3.8 | Fix6: stop BE inválido após D1 (acima do mercado) | v4.1";
                 Name        = "Scalp20_34";
                 Calculate   = Calculate.OnBarClose;
 
@@ -175,7 +220,7 @@ namespace NinjaTrader.NinjaScript.Strategies
 
                 // Este print sempre sai — é o único sem guard (inicialização)
                 Print("[Scalp20_34] ══ Iniciado em " + DateTime.Now.ToString("dd/MM/yyyy HH:mm:ss") +
-                      " | v3.4 | Long=" + HabilitarLong +
+                      " | v3.7 | Long=" + HabilitarLong +
                       " Short=" + HabilitarShort +
                       " StopRange=" + UsarStopRange +
                       " StopSwing=" + UsarStopSwing +
@@ -290,14 +335,17 @@ namespace NinjaTrader.NinjaScript.Strategies
                     .Sum(t => t.ProfitCurrency);
             }
 
-            // Contagem de stops
+            // Contagem de stops — uma vez por trade, independente de fill em lotes
+            // Fill em 2 lotes gera 2 execuções de stop → sem flag contaria 2x
             if (execution.Order.OrderState == OrderState.Filled &&
                (execution.Order.OrderType == OrderType.StopMarket ||
                 execution.Order.OrderType == OrderType.StopLimit) &&
                 execution.Order.Name != "ScalpLong" &&
-                execution.Order.Name != "ScalpShort")
+                execution.Order.Name != "ScalpShort" &&
+                !_stopContadoEsteTradeFlag)
             {
                 _stopsHoje++;
+                _stopContadoEsteTradeFlag = true; // bloqueia contagem duplicada
                 if (ModoDebug)
                     Print("[Scalp20_34] Stop executado — total hoje: " + _stopsHoje);
             }
@@ -311,6 +359,48 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (_fase == Fase.Executada)
                     ResetarFase();
             }
+
+            // ── Fix 5: detectar flat por evento externo (session close, zerar manual) ──
+            // GerenciarSaida() só roda no OnBarUpdate — se o NT8 fechar a posição fora
+            // do ciclo de barras (ex: Exit on session close às 18:00), o FSM permanece
+            // em Executada e o stop pendente dispara na sessão seguinte como órfão.
+            // Aqui detectamos qualquer fill que resulte em Position.Flat enquanto o
+            // FSM está em Executada e resetamos imediatamente.
+            if (_fase == Fase.Executada &&
+                execution.Order.OrderState == OrderState.Filled &&
+                Position.MarketPosition == MarketPosition.Flat)
+            {
+                Print("[Scalp20_34] Fix5 — Flat detectado em OnExecutionUpdate" +
+                      " (ordem=" + execution.Order.Name + ") → ResetarFase() imediato");
+                ResetarFase();
+                return;
+            }
+            // ─────────────────────────────────────────────────────────────────
+
+            // ── Fix 4b corrigido: detectar inversão via Position.MarketPosition ──
+            // NOTA: o parâmetro marketPosition em OnExecutionUpdate indica a DIREÇÃO
+            // do fill (Short = venda), não a posição resultante. Usar Position.MarketPosition
+            // que reflete o estado da conta após o fill.
+            // Fix 4b reseta FSM imediatamente; Fix 4a (OnBarUpdate) fecha a posição invertida.
+            if (execution.Order.OrderState == OrderState.Filled &&
+               (execution.Order.OrderType == OrderType.StopMarket ||
+                execution.Order.OrderType == OrderType.StopLimit) &&
+                _fase == Fase.Executada)
+            {
+                bool inversaoLong  = Position.MarketPosition == MarketPosition.Short
+                                     && HabilitarLong && !HabilitarShort;
+                bool inversaoShort = Position.MarketPosition == MarketPosition.Long
+                                     && HabilitarShort && !HabilitarLong;
+
+                if (inversaoLong || inversaoShort)
+                {
+                    if (ModoDebug)
+                        Print("[Scalp20_34] Fix4b — Inversão confirmada via Position.MarketPosition=" +
+                              Position.MarketPosition + " → ResetarFase() imediato");
+                    ResetarFase();
+                }
+            }
+            // ─────────────────────────────────────────────────────────────────
         }
 
         #endregion
@@ -496,6 +586,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _precoD3      = 0;
             _fase         = Fase.Executada;
             _entradasHoje++;
+            _stopContadoEsteTradeFlag = false; // libera contagem para este novo trade
 
             EnterLong(Contratos, "ScalpLong");
             SetStopLoss("ScalpLong", CalculationMode.Price, stopPrice, false);
@@ -527,6 +618,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             _precoD3      = 0;
             _fase         = Fase.Executada;
             _entradasHoje++;
+            _stopContadoEsteTradeFlag = false; // libera contagem para este novo trade
 
             EnterShort(Contratos, "ScalpShort");
             SetStopLoss("ScalpShort", CalculationMode.Price, stopPrice, false);
@@ -557,6 +649,41 @@ namespace NinjaTrader.NinjaScript.Strategies
                 return;
             }
 
+            // ── Fix 4a: guard de inversão acidental ──────────────────────────
+            // Ocorre quando stop de 5ct é disparado sobre posição residual de 2ct
+            // após D1: zera os 2ct Long e abre 3ct Short involuntário.
+            // Detecta e fecha emergencialmente na próxima barra.
+            if (_fase == Fase.Executada)
+            {
+                bool longAberto  = Position.MarketPosition == MarketPosition.Long;
+                bool shortAberto = Position.MarketPosition == MarketPosition.Short;
+
+                // Esperávamos Long mas estamos Short (ou vice-versa)
+                bool inversaoLong  = HabilitarLong  && !HabilitarShort && shortAberto;
+                bool inversaoShort = HabilitarShort && !HabilitarLong  && longAberto;
+                // Qualquer Short aberto após D1 executada quando Short está desabilitado
+                bool inversaoPos  = _d1Executada && shortAberto && !HabilitarShort;
+
+                if (inversaoLong || inversaoShort || inversaoPos)
+                {
+                    if (ModoDebug)
+                        Print("[Scalp20_34] Fix4a INVERSAO DETECTADA" +
+                              " pos=" + Position.MarketPosition +
+                              " qtd=" + Position.Quantity +
+                              " d1=" + _d1Executada + " → EmergencyFlat + Reset");
+
+                    // Fecha a posição invertida
+                    if (shortAberto)
+                        ExitShort(Position.Quantity, "EmergencyFlat_Short", "ScalpShort");
+                    else
+                        ExitLong(Position.Quantity, "EmergencyFlat_Long", "ScalpLong");
+
+                    ResetarFase();
+                    return;
+                }
+            }
+            // ─────────────────────────────────────────────────────────────────
+
             int posQtd = Position.Quantity;
 
             // C2: aguarda fill completo
@@ -566,9 +693,27 @@ namespace NinjaTrader.NinjaScript.Strategies
                 {
                     _fillCompleto = true;
                     _qtdInicial   = Contratos; // C1
+
+                    // Bug 3 fix: reemite stop consolidado após fill completo
+                    // O stop inicial na entrada cobre a posição durante o fill
+                    // mas pode estar fragmentado por lotes — reemissão aqui
+                    // garante um único stop para a posição consolidada
+                    string nomeOrdem = Position.MarketPosition == MarketPosition.Long
+                        ? "ScalpLong" : "ScalpShort";
+                    SetStopLoss(nomeOrdem, CalculationMode.Price, _stopInicial, false);
+
+                    // Fix 4c: atualiza _entradaPreco com o preço médio real de fill
+                    // Close[0] no barclose pode divergir 1-2pt do fill médio real,
+                    // causando BE ligeiramente abaixo do custo real da posição.
+                    // Position.AveragePrice é o preço médio ponderado dos fills.
+                    _entradaPreco = Position.AveragePrice;
+
                     if (ModoDebug)
                         Print("[Scalp20_34] fillCompleto posQtd=" + posQtd +
-                              " _qtdInicial=" + _qtdInicial);
+                              " _qtdInicial=" + _qtdInicial +
+                              " stop=" + _stopInicial.ToString("F2") + " reemitido" +
+                              " | entradaPreco ajustado=" + _entradaPreco.ToString("F2") +
+                              " (era Close[0]=" + Close[0].ToString("F2") + ")");
                 }
                 else
                 {
@@ -598,21 +743,25 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Math.Max(1, (int)Math.Round(_qtdInicial * D1PctContratos / 100.0)),
                     posQtd);
 
-                // ExitLong ANTES do SetStopLoss (Bug1 fix v3.3)
+                // Bug 1 fix: ExitLong ANTES do SetStopLoss
                 ExitLong(qtdD1, "D1_Long", "ScalpLong");
-
-                // v3.4 fix desalavancagem: residual explícito no SetStopLoss
-                // Sem isso o NT8 emite o stop para a quantidade original da entrada,
-                // e ao ser atingido fecha o residual + inverte a posição.
-                int residualD1 = posQtd - qtdD1;
 
                 // Clamp: BE nunca regride abaixo do stop inicial
                 double bePrice = Math.Max(
                     _entradaPreco + TickSize * StopBufferTicks,
                     _stopInicial);
 
-                if (residualD1 > 0)
-                    SetStopLoss("ScalpLong", CalculationMode.Price, bePrice, false, residualD1);
+                // Fix 6: stop de venda não pode ser >= Close[0] (Rithmic rejeita)
+                // Se o mercado recuou abaixo do BE calculado, ajusta para 2t abaixo do close atual
+                if (bePrice >= Close[0])
+                    bePrice = Close[0] - 2 * TickSize;
+
+                // Fix 4d: SetStopLoss sem fromEntrySignal ("") após saída parcial.
+                // Com fromEntrySignal="ScalpLong" e StopTargetHandling="Execução por entrada",
+                // o NT8 pode manter a quantidade original da entrada (5ct) na ordem de stop
+                // mesmo após ExitLong reduzir a posição para 2ct residual.
+                // Usar "" força o NT8 a aplicar o stop sobre a posição corrente.
+                SetStopLoss("", CalculationMode.Price, bePrice, false);
 
                 _d1Executada = true;
                 _breakEven   = true;
@@ -621,9 +770,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Print("[Scalp20_34] D1 Long qtd=" + qtdD1 +
                           " lucro=" + lucroTicks.ToString("F0") + "t" +
                           " BE=" + bePrice.ToString("F2") +
-                          " residual=" + residualD1 + "ct");
-
-                posQtd = residualD1; // atualiza qtd local para fases seguintes no mesmo bar
+                          " residual=" + (posQtd - qtdD1) + "ct");
             }
 
             // D2
@@ -640,15 +787,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                         posQtd);
 
                     _precoD2 = Close[0];
-                    // ExitLong antes do SetStopLoss (Bug1 fix v3.3)
+                    // Bug 1 fix: ExitLong antes do SetStopLoss
                     ExitLong(qtdD2, "D2_Long", "ScalpLong");
-
-                    // v3.4 fix desalavancagem: residual explícito no SetStopLoss
-                    int residualD2 = posQtd - qtdD2;
-                    double stopD2  = _precoD2 - TickSize * D2StopAposSaidaTicks;
-
-                    if (residualD2 > 0)
-                        SetStopLoss("ScalpLong", CalculationMode.Price, stopD2, false, residualD2);
+                    double stopD2 = _precoD2 - TickSize * D2StopAposSaidaTicks;
+                    // Fix 4d: sem fromEntrySignal para garantir quantidade correta
+                    SetStopLoss("", CalculationMode.Price, stopD2, false);
 
                     _d2Executada = true;
 
@@ -656,10 +799,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                         Print("[Scalp20_34] D2 Long qtd=" + qtdD2 +
                               " lucro=" + lucroTicks.ToString("F0") + "t" +
                               " precoD2=" + _precoD2.ToString("F2") +
-                              " stopD2=" + stopD2.ToString("F2") +
-                              " residual=" + residualD2 + "ct");
-
-                    posQtd = residualD2; // atualiza qtd local para fases seguintes no mesmo bar
+                              " stopD2=" + stopD2.ToString("F2"));
                 }
             }
 
@@ -674,15 +814,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                         posQtd);
 
                     _precoD3 = Close[0];
-                    // ExitLong antes do SetStopLoss (Bug1 fix v3.3)
+                    // Bug 1 fix: ExitLong antes do SetStopLoss
                     ExitLong(qtdD3, "D3_Long", "ScalpLong");
-
-                    // v3.4 fix desalavancagem: residual explícito no SetStopLoss
-                    int residualD3 = posQtd - qtdD3;
-                    double stopD3  = _precoD3 - TickSize * D3StopAposSaidaTicks;
-
-                    if (residualD3 > 0)
-                        SetStopLoss("ScalpLong", CalculationMode.Price, stopD3, false, residualD3);
+                    double stopD3 = _precoD3 - TickSize * D3StopAposSaidaTicks;
+                    // Fix 4d: sem fromEntrySignal para garantir quantidade correta
+                    SetStopLoss("", CalculationMode.Price, stopD3, false);
 
                     _d3Executada = true;
                     _emTrail     = true;
@@ -690,9 +826,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (ModoDebug)
                         Print("[Scalp20_34] D3 Long qtd=" + qtdD3 +
                               " lucro=" + lucroTicks.ToString("F0") + "t" +
-                              " residual=" + residualD3 + "ct → Trail ON");
-
-                    posQtd = residualD3; // atualiza qtd local para o trail no mesmo bar
+                              " → Trail ON");
                 }
             }
 
@@ -701,7 +835,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (_d2Executada && !_emTrail && !UsarD3)             _emTrail = true;
 
             if (_emTrail && posQtd > 0)
-                SetTrailStop("ScalpLong", CalculationMode.Ticks, TrailAposD3Ticks, false);
+                SetTrailStop("", CalculationMode.Ticks, TrailAposD3Ticks, false);
         }
 
         // ── Short ────────────────────────────────────────────────────────────
@@ -716,19 +850,21 @@ namespace NinjaTrader.NinjaScript.Strategies
                     Math.Max(1, (int)Math.Round(_qtdInicial * D1PctContratos / 100.0)),
                     posQtd);
 
-                // ExitShort ANTES do SetStopLoss (Bug1 fix v3.3)
+                // Bug 1 fix: ExitShort ANTES do SetStopLoss
                 ExitShort(qtdD1, "D1_Short", "ScalpShort");
-
-                // v3.4 fix desalavancagem: residual explícito no SetStopLoss
-                int residualD1 = posQtd - qtdD1;
 
                 // Clamp: BE nunca avança acima do stop inicial (Short)
                 double bePrice = Math.Min(
                     _entradaPreco - TickSize * StopBufferTicks,
                     _stopInicial);
 
-                if (residualD1 > 0)
-                    SetStopLoss("ScalpShort", CalculationMode.Price, bePrice, false, residualD1);
+                // Fix 6: stop de compra não pode ser <= Close[0] (Rithmic rejeita)
+                // Se o mercado subiu acima do BE calculado, ajusta para 2t acima do close atual
+                if (bePrice <= Close[0])
+                    bePrice = Close[0] + 2 * TickSize;
+
+                // Fix 4d: sem fromEntrySignal para garantir quantidade correta
+                SetStopLoss("", CalculationMode.Price, bePrice, false);
 
                 _d1Executada = true;
                 _breakEven   = true;
@@ -736,10 +872,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                 if (ModoDebug)
                     Print("[Scalp20_34] D1 Short qtd=" + qtdD1 +
                           " lucro=" + lucroTicks.ToString("F0") + "t" +
-                          " BE=" + bePrice.ToString("F2") +
-                          " residual=" + residualD1 + "ct");
-
-                posQtd = residualD1; // atualiza qtd local para fases seguintes no mesmo bar
+                          " BE=" + bePrice.ToString("F2"));
             }
 
             // D2
@@ -752,26 +885,18 @@ namespace NinjaTrader.NinjaScript.Strategies
                         posQtd);
 
                     _precoD2 = Close[0];
-                    // ExitShort antes do SetStopLoss (Bug1 fix v3.3)
+                    // Bug 1 fix: ExitShort antes do SetStopLoss
                     ExitShort(qtdD2, "D2_Short", "ScalpShort");
-
-                    // v3.4 fix desalavancagem: residual explícito no SetStopLoss
-                    int residualD2 = posQtd - qtdD2;
-                    double stopD2  = _precoD2 + TickSize * D2StopAposSaidaTicks;
-
-                    if (residualD2 > 0)
-                        SetStopLoss("ScalpShort", CalculationMode.Price, stopD2, false, residualD2);
+                    double stopD2 = _precoD2 + TickSize * D2StopAposSaidaTicks;
+                    // Fix 4d: sem fromEntrySignal para garantir quantidade correta
+                    SetStopLoss("", CalculationMode.Price, stopD2, false);
 
                     _d2Executada = true;
 
                     if (ModoDebug)
                         Print("[Scalp20_34] D2 Short qtd=" + qtdD2 +
                               " lucro=" + lucroTicks.ToString("F0") + "t" +
-                              " precoD2=" + _precoD2.ToString("F2") +
-                              " stopD2=" + stopD2.ToString("F2") +
-                              " residual=" + residualD2 + "ct");
-
-                    posQtd = residualD2; // atualiza qtd local para fases seguintes no mesmo bar
+                              " precoD2=" + _precoD2.ToString("F2"));
                 }
             }
 
@@ -786,15 +911,11 @@ namespace NinjaTrader.NinjaScript.Strategies
                         posQtd);
 
                     _precoD3 = Close[0];
-                    // ExitShort antes do SetStopLoss (Bug1 fix v3.3)
+                    // Bug 1 fix: ExitShort antes do SetStopLoss
                     ExitShort(qtdD3, "D3_Short", "ScalpShort");
-
-                    // v3.4 fix desalavancagem: residual explícito no SetStopLoss
-                    int residualD3 = posQtd - qtdD3;
-                    double stopD3  = _precoD3 + TickSize * D3StopAposSaidaTicks;
-
-                    if (residualD3 > 0)
-                        SetStopLoss("ScalpShort", CalculationMode.Price, stopD3, false, residualD3);
+                    double stopD3 = _precoD3 + TickSize * D3StopAposSaidaTicks;
+                    // Fix 4d: sem fromEntrySignal para garantir quantidade correta
+                    SetStopLoss("", CalculationMode.Price, stopD3, false);
 
                     _d3Executada = true;
                     _emTrail     = true;
@@ -802,9 +923,7 @@ namespace NinjaTrader.NinjaScript.Strategies
                     if (ModoDebug)
                         Print("[Scalp20_34] D3 Short qtd=" + qtdD3 +
                               " lucro=" + lucroTicks.ToString("F0") + "t" +
-                              " residual=" + residualD3 + "ct → Trail ON");
-
-                    posQtd = residualD3; // atualiza qtd local para o trail no mesmo bar
+                              " → Trail ON");
                 }
             }
 
@@ -813,7 +932,7 @@ namespace NinjaTrader.NinjaScript.Strategies
             if (_d2Executada && !_emTrail && !UsarD3)             _emTrail = true;
 
             if (_emTrail && posQtd > 0)
-                SetTrailStop("ScalpShort", CalculationMode.Ticks, TrailAposD3Ticks, true);
+                SetTrailStop("", CalculationMode.Ticks, TrailAposD3Ticks, true);
         }
 
         #endregion
